@@ -14,6 +14,7 @@ SkillReg is a Go CLI tool with an interactive TUI for managing agent skills acro
 - **Git operations:** Shell out to `git` CLI
 - **Release:** GoReleaser + GitHub Actions
 - **Binary name:** `skillreg`
+- **Runtime data:** `~/.config/skillreg/skillreg.db` (follows XDG convention; respects `$XDG_CONFIG_HOME` if set)
 
 ## Data Model
 
@@ -96,9 +97,11 @@ Seeded on first run:
 | VSCode / Copilot | `.github` |
 | Antigravity | `.agents` |
 
-**Note:** Codex and Antigravity share the `.agents` config directory prefix. During home directory scanning, if `~/.agents/` is found, the user is prompted to choose which provider to assign the instance to (or both).
+**Note:** Codex and Antigravity share the `.agents` config directory prefix. Since they map to the same physical directory (`~/.agents/skills`), only one instance can be created for `~/.agents/` (due to UNIQUE constraint on `global_skills_path`). During home directory scanning, if `~/.agents/` is found, the user picks which provider to assign it to. The instance name is auto-suggested based on the directory name (e.g., `agents-default`).
 
 No instances are created automatically. The scan offer is shown when zero instances exist and the user enters the Providers menu. If the user dismisses the scan, it is not shown again — they can add instances manually. This is tracked by checking instance count, not a separate flag.
+
+**Home directory scan logic:** A config directory is "found" when `~/.<prefix>*/` exists as a directory (e.g., `~/.claude-personal/`, `~/.codex/`). The `skills/` subdirectory inside does not need to exist — it will be created on first skill install. Instance names are auto-suggested from the directory name without the leading dot (e.g., `.claude-personal` → `claude-personal`).
 
 ## Application Structure
 
@@ -131,8 +134,8 @@ skillreg/
 │       ├── menu_providers.go    -- providers submenu with instances
 │       ├── components/          -- reusable TUI components
 │       └── styles.go            -- Lipgloss styles/theme
-├── data/
-│   └── skillreg.db              -- SQLite database (gitignored, runtime location)
+├── data/                            -- default DB location for development
+│   └── skillreg.db
 ├── .github/
 │   └── workflows/
 │       └── release.yml          -- GoReleaser build + GitHub Release
@@ -212,7 +215,7 @@ All discovered skills are treated as universal — installable to any provider i
 
 The skill name is derived from the immediate parent directory of `SKILL.md`.
 
-Skill description is extracted from `SKILL.md` by reading the YAML frontmatter `description` field if present, otherwise the first non-empty, non-heading line of the file.
+Skill description is extracted from `SKILL.md` by reading the YAML frontmatter `description` field if present, otherwise the first non-empty, non-heading line (not starting with `#`) of the file. If the file is empty or parsing fails, description defaults to an empty string. Malformed frontmatter is ignored (treated as no frontmatter). No other frontmatter fields are used.
 
 ## Symlink Management
 
@@ -272,7 +275,7 @@ For each source, run `git fetch`. Compare `HEAD` vs `origin/<branch>`, count com
 
 **Install methods:**
 - Download binary from GitHub Releases
-- `go install github.com/<owner>/skillreg@latest`
+- `go install` (owner/org TBD at repository creation time)
 
 ## Scope
 
