@@ -14,7 +14,7 @@ SkillReg is a Go CLI tool with an interactive TUI for managing agent skills acro
 - **Git operations:** Shell out to `git` CLI
 - **Release:** GoReleaser + GitHub Actions
 - **Binary name:** `skillreg`
-- **Runtime data:** `~/.config/skillreg/skillreg.db` (follows XDG convention; respects `$XDG_CONFIG_HOME` if set)
+- **Runtime data:** `~/.local/share/skillreg/skillreg.db` (follows XDG convention; respects `$XDG_DATA_HOME` if set)
 
 ## Data Model
 
@@ -97,7 +97,7 @@ Seeded on first run:
 | VSCode / Copilot | `.github` |
 | Antigravity | `.agents` |
 
-**Note:** Codex and Antigravity share the `.agents` config directory prefix. Since they map to the same physical directory (`~/.agents/skills`), only one instance can be created for `~/.agents/` (due to UNIQUE constraint on `global_skills_path`). During home directory scanning, if `~/.agents/` is found, the user picks which provider to assign it to. The instance name is auto-suggested based on the directory name (e.g., `agents-default`).
+**Note:** Codex and Antigravity share the `.agents` config directory prefix. Since they map to the same physical directory (`~/.agents/skills`), only one instance can be created for `~/.agents/` (due to UNIQUE constraint on `global_skills_path`). During home directory scanning or manual instance creation, if the resolved `global_skills_path` already exists in another instance, the user is warned and the creation is blocked. The instance name is auto-suggested based on the directory name (e.g., `agents-default`).
 
 No instances are created automatically. The scan offer is shown when zero instances exist and the user enters the Providers menu. If the user dismisses the scan, it is not shown again — they can add instances manually. This is tracked by checking instance count, not a separate flag.
 
@@ -134,8 +134,7 @@ skillreg/
 │       ├── menu_providers.go    -- providers submenu with instances
 │       ├── components/          -- reusable TUI components
 │       └── styles.go            -- Lipgloss styles/theme
-├── data/                            -- default DB location for development
-│   └── skillreg.db
+├── data/                            -- gitignored, for local development/testing only
 ├── .github/
 │   └── workflows/
 │       └── release.yml          -- GoReleaser build + GitHub Release
@@ -275,7 +274,6 @@ For each source, run `git fetch`. Compare `HEAD` vs `origin/<branch>`, count com
 
 **Install methods:**
 - Download binary from GitHub Releases
-- `go install` (owner/org TBD at repository creation time)
 
 ## Scope
 
