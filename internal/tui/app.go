@@ -71,26 +71,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
-		switch {
-		// q quits only from the main menu
-		case msg.String() == "q" || msg.String() == "ctrl+c":
-			if a.current == viewMain {
-				return a, tea.Quit
-			}
-			// In sub-menus ctrl+c always quits; q goes back
-			if msg.String() == "ctrl+c" {
-				return a, tea.Quit
-			}
-			// q in a sub-menu acts like esc (go back)
-			a.current = viewMain
-			return a, nil
-
-		case msg.String() == "esc":
-			if a.current != viewMain {
-				a.current = viewMain
-				return a, nil
-			}
+		// ctrl+c always quits from anywhere
+		if msg.String() == "ctrl+c" {
+			return a, tea.Quit
 		}
+		// q quits from the main menu only; in sub-menus it's delegated
+		if msg.String() == "q" && a.current == viewMain {
+			return a, tea.Quit
+		}
+		// esc from main menu does nothing; in sub-menus it's delegated
+		// (sub-menus return navigate(viewMain) when at their root view)
 	}
 
 	// Delegate to the active sub-menu.
