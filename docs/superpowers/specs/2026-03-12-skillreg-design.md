@@ -47,7 +47,7 @@ SkillReg is a Go CLI tool with an interactive TUI for managing agent skills acro
 | id | INTEGER PK | Auto-increment |
 | provider_id | INTEGER FK | References providers |
 | name | TEXT | e.g., "claude-personal", "claude-work" |
-| global_skills_path | TEXT | Resolved absolute path, e.g., `~/.claude-personal/skills` |
+| global_skills_path | TEXT | Resolved absolute path (tilde expanded), e.g., `/Users/vladyslav/.claude-personal/skills` |
 | is_default | BOOLEAN | The "main" instance for this provider |
 | created_at | TIMESTAMP | When instance was added |
 
@@ -74,9 +74,14 @@ SkillReg is a Go CLI tool with an interactive TUI for managing agent skills acro
 | installed_at | TIMESTAMP | When installed |
 | status | TEXT | "active", "broken", "orphaned" |
 
-### Hardcoded Constants
+### Constraints
 
-- Skills subdirectory: `skills/` — universal across all providers, not stored in DB
+- Skills subdirectory is always `skills/` — universal across all providers, not stored in DB. The `instances.global_skills_path` column stores the fully resolved path including the `skills/` suffix (e.g., `~/.claude-personal/skills`). The symlink formula is: `<global_skills_path>/<skill_name>`.
+- `UNIQUE(source_id, original_path)` on `skills` table — prevents duplicates on rescan.
+- `UNIQUE(skill_id, instance_id)` on `installations` table — prevents double-install.
+- `UNIQUE(name)` on `providers` table.
+- `UNIQUE(name)` on `instances` table.
+- `UNIQUE(global_skills_path)` on `instances` table — prevents two instances pointing to the same directory, which would cause symlink conflicts.
 
 ## Default Providers
 
@@ -91,7 +96,9 @@ Seeded on first run:
 | VSCode / Copilot | `.github` |
 | Antigravity | `.agents` |
 
-No instances are created automatically. On first visit to Providers menu, offer to scan `~/` for existing config directories and register them as instances.
+**Note:** Codex and Antigravity share the `.agents` config directory prefix. During home directory scanning, if `~/.agents/` is found, the user is prompted to choose which provider to assign the instance to (or both).
+
+No instances are created automatically. The scan offer is shown when zero instances exist and the user enters the Providers menu. If the user dismisses the scan, it is not shown again — they can add instances manually. This is tracked by checking instance count, not a separate flag.
 
 ## Application Structure
 
@@ -125,7 +132,7 @@ skillreg/
 │       ├── components/          -- reusable TUI components
 │       └── styles.go            -- Lipgloss styles/theme
 ├── data/
-│   └── skillreg.db              -- SQLite database (gitignored)
+│   └── skillreg.db              -- SQLite database (gitignored, runtime location)
 ├── .github/
 │   └── workflows/
 │       └── release.yml          -- GoReleaser build + GitHub Release
@@ -140,9 +147,10 @@ skillreg/
 
 1. Initialize DB (run migrations if needed)
 2. Seed default providers if first run
-3. Background `git fetch` on all sources
-4. For sources with `auto_update: true` — auto `git pull` + rescan
-5. Show main menu with update notifications
+3. Show main menu immediately
+4. Concurrently: run `git fetch` on all sources in background goroutines
+5. As fetches complete, update the notification banner in the main menu
+6. For sources with `auto_update: true` — auto `git pull` + rescan after fetch completes
 
 ### Main Menu
 
@@ -162,7 +170,7 @@ skillreg/
 
 ### Skills Menu
 
-**Browse all** — table with skill name, source, and where installed. Filterable. Enter for details.
+**Browse all** — table with skill name, source, and where installed. Filterable. Skills with the same name from different sources are disambiguated by showing the source name in parentheses (e.g., "context-files (dev-copilot)" vs "context-files (skills)"). Enter for details.
 
 **Install skill:**
 1. Fuzzy-searchable skill list
@@ -198,9 +206,13 @@ List providers with their instances nested underneath. Select a provider to mana
 
 Recursive scan of source repos for any directory containing a `SKILL.md` file. Scans all directories including dot-prefixed ones (`.claude/`, `.github/`, `.agents/`, etc.).
 
+**Excluded directories:** `.git/`, `node_modules/`, `vendor/`, `__pycache__/`, `.venv/` — these are never scanned.
+
 All discovered skills are treated as universal — installable to any provider instance regardless of their original location in the source repo.
 
 The skill name is derived from the immediate parent directory of `SKILL.md`.
+
+Skill description is extracted from `SKILL.md` by reading the YAML frontmatter `description` field if present, otherwise the first non-empty, non-heading line of the file.
 
 ## Symlink Management
 
@@ -214,7 +226,7 @@ Example:
 ```
 
 - Create parent directories if they don't exist
-- On collision with plain directory: backup as `<name>.skill.bak.zip`, replace with symlink
+- On collision with plain directory: backup as `<name>.skill.bak.zip` in the same parent directory (overwrites any previous backup of the same name), then replace with symlink
 - On collision with existing symlink: warn + pick/rename
 
 ### Health Checks
@@ -222,7 +234,7 @@ Example:
 On startup or manual trigger:
 - Iterate all installations in DB
 - Check each symlink: exists? points to correct target? target still exists?
-- Mark status: `active`, `broken` (dangling), `orphaned` (removed outside skillreg)
+- Mark status: `active`, `broken` (symlink exists on disk but target directory is gone), `orphaned` (DB record exists but symlink file was removed from disk outside skillreg)
 - Surface broken/orphaned in the UI with repair options
 
 ## Git Operations
@@ -238,11 +250,11 @@ For each source, run `git fetch`. Compare `HEAD` vs `origin/<branch>`, count com
 3. On dirty working tree, offer options:
    - Stash changes and pull
    - Skip this source
-   - Open terminal at source directory
+   - Open terminal at source directory (suspends TUI, spawns user's shell at the source path, TUI resumes on exit)
 4. On merge conflict / non-fast-forward, offer options:
-   - Force pull (reset to remote)
+   - Force pull (reset to `origin/<current-branch>` of the source repo)
    - Skip this source
-   - Open terminal at source directory
+   - Open terminal at source directory (suspends TUI, spawns user's shell at the source path, TUI resumes on exit)
 
 ### Post-Pull
 
