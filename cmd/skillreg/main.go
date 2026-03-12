@@ -10,7 +10,16 @@ import (
 	"github.com/vladyslav/skillreg/internal/tui"
 )
 
+// Version is set at build time via ldflags.
+var Version = "dev"
+
 func main() {
+	// Handle --version flag
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("skillreg %s\n", Version)
+		os.Exit(0)
+	}
+
 	// Open (or create) the database.
 	database, err := db.Open(config.DBPath())
 	if err != nil {
