@@ -12,29 +12,31 @@ SkillRegistry follows a three-step workflow:
 
 ## Installation
 
-### Using a Pre-built Binary
+### Quick Install (macOS/Linux)
 
-Download the latest binary for your platform from [releases](https://github.com/vladyslav/skillreg/releases):
-
-```bash
-# Linux or macOS
-tar -xzf skillreg_linux_amd64.tar.gz
-sudo mv skillreg /usr/local/bin/
-
-# Windows (PowerShell)
-Expand-Archive skillreg_windows_amd64.zip
-mv skillreg.exe "C:\Program Files\skillreg\"
+```sh
+curl -sSL https://raw.githubusercontent.com/kochkarovv/skillreg/main/install.sh | sh
 ```
 
-### Building from Source
+### Pre-built Binaries
 
-Requires Go 1.22+:
+Download the latest release from the [releases page](https://github.com/kochkarovv/skillreg/releases).
 
-```bash
-git clone https://github.com/vladyslav/skillreg.git
+### Build from Source
+
+```sh
+git clone https://github.com/kochkarovv/skillreg.git
 cd skillreg
 go build -o skillreg ./cmd/skillreg
-sudo mv skillreg /usr/local/bin/
+mv skillreg /usr/local/bin/
+```
+
+### Updating
+
+skillreg checks for updates on launch. When a new version is available, press `[u]` to update. You can also update from the command line:
+
+```sh
+skillreg update
 ```
 
 ## Usage
