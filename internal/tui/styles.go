@@ -12,5 +12,6 @@ var (
 	normalStyle     = lipgloss.NewStyle()
 	boxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7D56F4")).Padding(1, 2)
 	activeTabStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAFAFA")).Background(lipgloss.Color("#7D56F4")).Padding(0, 2)
-	inactiveTabStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Padding(0, 2)
+	inactiveTabStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Padding(0, 2)
+	updateBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FAFAFA")).Background(lipgloss.Color("#FF9900")).Padding(0, 2).Bold(true)
 )

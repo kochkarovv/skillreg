@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/vladyslav/skillreg/internal/db"
+	"github.com/vladyslav/skillreg/internal/updater"
 )
 
 // view enumerates the possible screen states.
@@ -14,6 +18,7 @@ const (
 	viewSources
 	viewProviders
 	viewTools
+	viewUpdate
 )
 
 // navigateMsg is sent to switch the active view.
@@ -28,22 +33,39 @@ func navigate(target view) tea.Cmd {
 	}
 }
 
+// updateAvailableMsg is sent when a newer version is found.
+type updateAvailableMsg struct {
+	release *updater.Release
+}
+
+// updateDoneMsg is sent when the update download/apply finishes.
+type updateDoneMsg struct {
+	version string
+	err     error
+}
+
 // App is the root BubbleTea model. It owns a stack of sub-menus and
 // delegates Init / Update / View to whichever sub-menu is currently active.
 type App struct {
-	db       *db.Database
-	current  view
-	main     mainMenuModel
-	skills   skillsMenuModel
-	sources  sourcesMenuModel
+	db        *db.Database
+	current   view
+	main      mainMenuModel
+	skills    skillsMenuModel
+	sources   sourcesMenuModel
 	providers providersMenuModel
-	tools    toolsMenuModel
-	width    int
-	height   int
+	tools     toolsMenuModel
+	width     int
+	height    int
+
+	// Update
+	version         string
+	availableUpdate *updater.Release
+	updateStatus    string
+	previousView    view
 }
 
 // NewApp constructs an App with the given database connection.
-func NewApp(d *db.Database) App {
+func NewApp(d *db.Database, version string) App {
 	return App{
 		db:        d,
 		current:   viewMain,
@@ -51,13 +73,32 @@ func NewApp(d *db.Database) App {
 		skills:    newSkillsMenu(d),
 		sources:   newSourcesMenu(d),
 		providers: newProvidersMenu(d),
-		tools:    newToolsMenu(d),
+		tools:     newToolsMenu(d),
+		version:   version,
 	}
 }
 
-// Init kicks off the main-menu initialisation (which triggers background fetches).
+// Init kicks off the main-menu initialisation and background update check.
 func (a App) Init() tea.Cmd {
-	return a.main.Init()
+	return tea.Batch(a.main.Init(), a.checkForUpdate())
+}
+
+func (a App) checkForUpdate() tea.Cmd {
+	return func() tea.Msg {
+		rel, _ := updater.CheckLatest(a.version)
+		if rel != nil {
+			return updateAvailableMsg{release: rel}
+		}
+		return nil
+	}
+}
+
+func (a App) applyUpdate() tea.Cmd {
+	rel := a.availableUpdate
+	return func() tea.Msg {
+		err := updater.Apply(rel, "")
+		return updateDoneMsg{version: rel.TagName, err: err}
+	}
 }
 
 // Update handles global messages and delegates the rest to the active sub-menu.
@@ -68,6 +109,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.skills.height = msg.Height
+		return a, nil
+
+	case updateAvailableMsg:
+		a.availableUpdate = msg.release
+		return a, nil
+
+	case updateDoneMsg:
+		if msg.err != nil {
+			a.updateStatus = fmt.Sprintf("Update failed: %v", msg.err)
+		} else {
+			a.updateStatus = fmt.Sprintf("Updated to %s! Restart skillreg to use the new version.", msg.version)
+		}
 		return a, nil
 
 	case navigateMsg:
@@ -89,6 +142,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
+		// Handle esc/q from update view
+		if a.current == viewUpdate && (msg.String() == "esc" || msg.String() == "q") {
+			a.current = a.previousView
+			return a, nil
+		}
+		// [u] triggers update from anywhere (except update view itself)
+		if msg.String() == "u" && a.availableUpdate != nil && a.current != viewUpdate {
+			a.previousView = a.current
+			a.current = viewUpdate
+			a.updateStatus = fmt.Sprintf("Downloading %s...", a.availableUpdate.TagName)
+			return a, a.applyUpdate()
+		}
 		// ctrl+c always quits from anywhere
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
@@ -130,16 +195,40 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View delegates rendering to the active sub-menu.
 func (a App) View() string {
+	banner := a.updateBanner()
+	var content string
 	switch a.current {
+	case viewUpdate:
+		return a.viewUpdate()
 	case viewSkills:
-		return a.skills.view()
+		content = a.skills.view()
 	case viewSources:
-		return a.sources.view()
+		content = a.sources.view()
 	case viewProviders:
-		return a.providers.view()
+		content = a.providers.view()
 	case viewTools:
-		return a.tools.view()
+		content = a.tools.view()
 	default:
-		return a.main.view()
+		content = a.main.view()
 	}
+	return banner + content
+}
+
+func (a App) updateBanner() string {
+	if a.availableUpdate == nil {
+		return ""
+	}
+	return updateBannerStyle.Render(
+		fmt.Sprintf("Update available: %s → %s — press [u] to update",
+			a.version, a.availableUpdate.TagName)) + "\n"
+}
+
+func (a App) viewUpdate() string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Update"))
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + a.updateStatus)
+	sb.WriteString("\n\n")
+	sb.WriteString(subtleStyle.Render("esc back"))
+	return sb.String()
 }
