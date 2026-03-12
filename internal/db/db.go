@@ -66,7 +66,8 @@ func (d *Database) migrate() error {
 }
 
 // SeedProviders inserts all default providers into the database.
-// Uses INSERT OR IGNORE to make it idempotent.
+// Uses INSERT OR IGNORE for new providers and updates config_dir_prefix
+// for existing builtin providers to keep them in sync with code changes.
 func (d *Database) SeedProviders() error {
 	for _, provider := range DefaultProviders {
 		_, err := d.DB.Exec(
@@ -77,6 +78,15 @@ func (d *Database) SeedProviders() error {
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert provider %s: %w", provider.Name, err)
+		}
+		// Update config_dir_prefix for existing builtin providers
+		_, err = d.DB.Exec(
+			"UPDATE providers SET config_dir_prefix = ? WHERE name = ? AND is_builtin = 1",
+			provider.ConfigDirPrefix,
+			provider.Name,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to update provider %s: %w", provider.Name, err)
 		}
 	}
 	return nil

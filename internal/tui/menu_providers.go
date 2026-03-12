@@ -77,6 +77,9 @@ type providersMenuModel struct {
 
 	// Confirm remove
 	confirm components.ConfirmModel
+
+	// Auto-scan flag: triggers home scan on first list view render
+	needsAutoScan bool
 }
 
 // installDetailRow is a display row for an installed skill on an instance.
@@ -96,10 +99,11 @@ func newProvidersMenu(d *db.Database) providersMenuModel {
 	pathTI.CharLimit = 512
 
 	m := providersMenuModel{
-		db:        d,
-		nameInput: nameTI,
-		pathInput: pathTI,
-		scanSel:   make(map[int]bool),
+		db:            d,
+		nameInput:     nameTI,
+		pathInput:     pathTI,
+		scanSel:       make(map[int]bool),
+		needsAutoScan: true,
 	}
 	m.loadData()
 	return m
@@ -164,6 +168,22 @@ func (m providersMenuModel) update(msg tea.Msg) (providersMenuModel, tea.Cmd) {
 // --- List view ---
 
 func (m providersMenuModel) updateList(msg tea.Msg) (providersMenuModel, tea.Cmd) {
+	// Auto-scan on first entry to detect unregistered instances
+	if m.needsAutoScan {
+		m.needsAutoScan = false
+		m.runHomeScan()
+		if len(m.discovered) > 0 {
+			m.scanCursor = 0
+			m.scanSel = make(map[int]bool)
+			// Pre-select all discovered instances
+			for i := range m.discovered {
+				m.scanSel[i] = true
+			}
+			m.currentView = providersViewScanHome
+			return m, nil
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -195,16 +215,23 @@ func (m providersMenuModel) updateList(msg tea.Msg) (providersMenuModel, tea.Cmd
 
 				case "add":
 					m.addProvider = row.provider
-					// Check if zero total instances → offer scan
-					allInst, _ := models.ListAllInstances(m.db)
-					if len(allInst) == 0 {
-						m.runHomeScan()
-						if len(m.discovered) > 0 {
-							m.scanCursor = 0
-							m.scanSel = make(map[int]bool)
-							m.currentView = providersViewScanHome
-							return m, nil
+					// Check if there are undiscovered instances for this provider
+					m.runHomeScan()
+					var providerDiscovered []discoveredInstance
+					for _, d := range m.discovered {
+						if d.provider.ID == row.provider.ID {
+							providerDiscovered = append(providerDiscovered, d)
 						}
+					}
+					if len(providerDiscovered) > 0 {
+						m.discovered = providerDiscovered
+						m.scanCursor = 0
+						m.scanSel = make(map[int]bool)
+						for i := range m.discovered {
+							m.scanSel[i] = true
+						}
+						m.currentView = providersViewScanHome
+						return m, nil
 					}
 					m.prepareAddInstance(row.provider)
 					m.currentView = providersViewAddInstance
@@ -320,7 +347,11 @@ func (m *providersMenuModel) prepareAddInstance(provider *models.Provider) {
 	// Suggest a path based on provider prefix
 	home, err := os.UserHomeDir()
 	if err == nil && provider.ConfigDirPrefix != "" {
-		m.suggestedPath = filepath.Join(home, "."+provider.ConfigDirPrefix+"default")
+		prefix := provider.ConfigDirPrefix
+		if !strings.HasPrefix(prefix, ".") {
+			prefix = "." + prefix
+		}
+		m.suggestedPath = filepath.Join(home, prefix, "skills")
 	} else {
 		m.suggestedPath = ""
 	}
@@ -410,13 +441,30 @@ func (m *providersMenuModel) runHomeScan() {
 		return
 	}
 
+	// Build a set of already-registered global_skills_path values
+	allInst, _ := models.ListAllInstances(m.db)
+	registered := make(map[string]bool, len(allInst))
+	for _, inst := range allInst {
+		registered[inst.GlobalSkillsPath] = true
+	}
+
 	var discovered []discoveredInstance
 	for _, node := range m.nodes {
 		p := node.provider
 		if p.ConfigDirPrefix == "" {
 			continue
 		}
-		pattern := filepath.Join(home, "."+p.ConfigDirPrefix+"*")
+		// ConfigDirPrefix already includes the dot (e.g. ".claude")
+		prefix := p.ConfigDirPrefix
+		if !strings.HasPrefix(prefix, ".") {
+			prefix = "." + prefix
+		}
+		// If the prefix already contains a glob wildcard, use it as-is;
+		// otherwise append * to match variants (e.g. ".claude" → ".claude*")
+		pattern := filepath.Join(home, prefix)
+		if !strings.Contains(prefix, "*") {
+			pattern = filepath.Join(home, prefix+"*")
+		}
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			continue
@@ -426,12 +474,17 @@ func (m *providersMenuModel) runHomeScan() {
 			if err != nil || !info.IsDir() {
 				continue
 			}
-			// Use the directory name as instance name
+			// The skills path is <match>/skills/
+			skillsPath := filepath.Join(match, "skills")
+			// Skip if already registered
+			if registered[skillsPath] || registered[match] {
+				continue
+			}
 			name := filepath.Base(match)
 			discovered = append(discovered, discoveredInstance{
 				provider: p,
 				name:     name,
-				path:     match,
+				path:     skillsPath,
 			})
 		}
 	}

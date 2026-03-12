@@ -64,7 +64,7 @@ The main menu provides navigation to:
 | Gemini | `~/.gemini` |
 | Cursor | `~/.cursor` |
 | VSCode Copilot | `~/.github` |
-| Antigravity | `~/.agents` |
+| Antigravity | `~/.gemini*/antigravity` |
 
 ## Adding Skills
 

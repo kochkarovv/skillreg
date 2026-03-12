@@ -67,5 +67,5 @@ var DefaultProviders = []DefaultProvider{
 	{Name: "Gemini", ConfigDirPrefix: ".gemini"},
 	{Name: "Cursor", ConfigDirPrefix: ".cursor"},
 	{Name: "VSCode Copilot", ConfigDirPrefix: ".github"},
-	{Name: "Antigravity", ConfigDirPrefix: ".agents"},
+	{Name: "Antigravity", ConfigDirPrefix: ".gemini*/antigravity"},
 }
