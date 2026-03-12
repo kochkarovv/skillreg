@@ -66,6 +66,27 @@ func ListAllSkills(d *db.Database) ([]*Skill, error) {
 	return collectSkills(rows)
 }
 
+// UpdateSkill updates the original_path and description of a skill.
+func UpdateSkill(d *db.Database, id int64, originalPath, description string) error {
+	_, err := d.DB.Exec(
+		`UPDATE skills SET original_path = ?, description = ? WHERE id = ?`,
+		originalPath, description, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update skill: %w", err)
+	}
+	return nil
+}
+
+// DeleteSkill removes a skill by ID.
+func DeleteSkill(d *db.Database, id int64) error {
+	_, err := d.DB.Exec(`DELETE FROM skills WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete skill: %w", err)
+	}
+	return nil
+}
+
 // DeleteSkillsBySource removes all skills belonging to a source.
 func DeleteSkillsBySource(d *db.Database, sourceID int64) error {
 	_, err := d.DB.Exec(`DELETE FROM skills WHERE source_id = ?`, sourceID)
@@ -91,7 +112,7 @@ func collectSkills(rows interface {
 	return skills, rows.Err()
 }
 
-func scanSkill(s scanner) (*Skill, error) {
+func scanSkill(s rowScanner) (*Skill, error) {
 	var sk Skill
 	var discoveredAt string
 	err := s.Scan(

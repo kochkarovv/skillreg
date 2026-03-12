@@ -59,7 +59,7 @@ func CreateProvider(d *db.Database, name, configDirPrefix string) (*Provider, er
 	return GetProvider(d, id)
 }
 
-func scanProvider(s scanner) (*Provider, error) {
+func scanProvider(s rowScanner) (*Provider, error) {
 	var p Provider
 	err := s.Scan(&p.ID, &p.Name, &p.ConfigDirPrefix, &p.IsBuiltin)
 	if err != nil {

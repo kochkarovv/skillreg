@@ -114,7 +114,7 @@ func collectInstallations(rows interface {
 	return installations, rows.Err()
 }
 
-func scanInstallation(s scanner) (*Installation, error) {
+func scanInstallation(s rowScanner) (*Installation, error) {
 	var inst Installation
 	var installedAt string
 	err := s.Scan(

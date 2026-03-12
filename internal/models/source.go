@@ -93,12 +93,12 @@ func UpdateSourceLastChecked(d *db.Database, id int64) error {
 	return nil
 }
 
-// scanner is satisfied by both *sql.Row and *sql.Rows.
-type scanner interface {
+// rowScanner is satisfied by both *sql.Row and *sql.Rows.
+type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanSource(s scanner) (*Source, error) {
+func scanSource(s rowScanner) (*Source, error) {
 	var src Source
 	var lastChecked *string
 	var createdAt string

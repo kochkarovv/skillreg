@@ -91,7 +91,7 @@ func collectInstances(rows interface {
 	return instances, rows.Err()
 }
 
-func scanInstance(s scanner) (*Instance, error) {
+func scanInstance(s rowScanner) (*Instance, error) {
 	var inst Instance
 	var createdAt string
 	err := s.Scan(
