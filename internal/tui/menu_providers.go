@@ -135,10 +135,18 @@ func (m *providersMenuModel) buildFlatRows() {
 		for _, inst := range node.instances {
 			rows = append(rows, flatRow{kind: "instance", provider: node.provider, instance: inst})
 		}
-		// [Add instance] row per provider
-		rows = append(rows, flatRow{kind: "add", provider: node.provider})
 	}
 	m.rows = rows
+	// Ensure cursor lands on a selectable row
+	if m.cursor >= len(m.rows) || !m.selectableRow(m.cursor) {
+		m.cursor = 0
+		for i := range m.rows {
+			if m.selectableRow(i) {
+				m.cursor = i
+				break
+			}
+		}
+	}
 }
 
 // selectableRow returns true if the row at index i can be selected.
@@ -204,39 +212,41 @@ func (m providersMenuModel) updateList(msg tea.Msg) (providersMenuModel, tea.Cmd
 		case "enter":
 			if m.cursor < len(m.rows) {
 				row := m.rows[m.cursor]
-				switch row.kind {
-				case "instance":
+				if row.kind == "instance" {
 					m.selectedInstance = row.instance
 					m.selectedProvider = row.provider
 					m.loadInstanceDetail()
 					m.detailCursor = 0
 					m.currentView = providersViewInstanceDetail
 					m.status = ""
-
-				case "add":
-					m.addProvider = row.provider
-					// Check if there are undiscovered instances for this provider
-					m.runHomeScan()
-					var providerDiscovered []discoveredInstance
-					for _, d := range m.discovered {
-						if d.provider.ID == row.provider.ID {
-							providerDiscovered = append(providerDiscovered, d)
-						}
-					}
-					if len(providerDiscovered) > 0 {
-						m.discovered = providerDiscovered
-						m.scanCursor = 0
-						m.scanSel = make(map[int]bool)
-						for i := range m.discovered {
-							m.scanSel[i] = true
-						}
-						m.currentView = providersViewScanHome
-						return m, nil
-					}
-					m.prepareAddInstance(row.provider)
-					m.currentView = providersViewAddInstance
-					return m, m.nameInput.Cursor.BlinkCmd()
 				}
+			}
+		case "a":
+			// Add instance — find which provider the cursor is under
+			if m.cursor < len(m.rows) {
+				provider := m.rows[m.cursor].provider
+				m.addProvider = provider
+				// Check if there are undiscovered instances for this provider
+				m.runHomeScan()
+				var providerDiscovered []discoveredInstance
+				for _, d := range m.discovered {
+					if d.provider.ID == provider.ID {
+						providerDiscovered = append(providerDiscovered, d)
+					}
+				}
+				if len(providerDiscovered) > 0 {
+					m.discovered = providerDiscovered
+					m.scanCursor = 0
+					m.scanSel = make(map[int]bool)
+					for i := range m.discovered {
+						m.scanSel[i] = true
+					}
+					m.currentView = providersViewScanHome
+					return m, nil
+				}
+				m.prepareAddInstance(provider)
+				m.currentView = providersViewAddInstance
+				return m, m.nameInput.Cursor.BlinkCmd()
 			}
 		case "esc", "q":
 			return m, navigate(viewMain)
@@ -528,10 +538,8 @@ func (m providersMenuModel) updateScanHome(msg tea.Msg) (providersMenuModel, tea
 			}
 			m.currentView = providersViewList
 		case "esc", "q":
-			// Go to manual add instead
-			m.prepareAddInstance(m.addProvider)
-			m.currentView = providersViewAddInstance
-			return m, m.nameInput.Cursor.BlinkCmd()
+			m.currentView = providersViewList
+			m.status = ""
 		}
 	}
 	return m, nil
@@ -587,15 +595,6 @@ func (m providersMenuModel) viewList() string {
 					sb.WriteString(normalStyle.Render("      "+label) + defaultTag)
 				}
 				sb.WriteString("\n")
-
-			case "add":
-				label := "[Add instance]"
-				if i == m.cursor {
-					sb.WriteString(selectedStyle.Render("    > " + label))
-				} else {
-					sb.WriteString(subtleStyle.Render("      " + label))
-				}
-				sb.WriteString("\n")
 			}
 		}
 	}
@@ -605,7 +604,7 @@ func (m providersMenuModel) viewList() string {
 		sb.WriteString(components.StatusBar(m.status, 60))
 		sb.WriteString("\n")
 	}
-	sb.WriteString(subtleStyle.Render("↑/↓ navigate • enter select • esc back"))
+	sb.WriteString(subtleStyle.Render("↑/↓ navigate • enter select • a add instance • esc back"))
 
 	return sb.String()
 }
