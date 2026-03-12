@@ -181,14 +181,7 @@ func (m providersMenuModel) updateList(msg tea.Msg) (providersMenuModel, tea.Cmd
 		m.needsAutoScan = false
 		m.runHomeScan()
 		if len(m.discovered) > 0 {
-			m.scanCursor = 0
-			m.scanSel = make(map[int]bool)
-			// Pre-select all discovered instances
-			for i := range m.discovered {
-				m.scanSel[i] = true
-			}
-			m.currentView = providersViewScanHome
-			return m, nil
+			m.status = fmt.Sprintf("%d new instance(s) discovered — press 'a' to add", len(m.discovered))
 		}
 	}
 
@@ -222,28 +215,21 @@ func (m providersMenuModel) updateList(msg tea.Msg) (providersMenuModel, tea.Cmd
 				}
 			}
 		case "a":
-			// Add instance — find which provider the cursor is under
+			// Add instance — scan for undiscovered, or manual add
+			m.runHomeScan()
+			if len(m.discovered) > 0 {
+				m.scanCursor = 0
+				m.scanSel = make(map[int]bool)
+				for i := range m.discovered {
+					m.scanSel[i] = true
+				}
+				m.currentView = providersViewScanHome
+				m.status = ""
+				return m, nil
+			}
+			// No discovered instances — manual add for current provider
 			if m.cursor < len(m.rows) {
 				provider := m.rows[m.cursor].provider
-				m.addProvider = provider
-				// Check if there are undiscovered instances for this provider
-				m.runHomeScan()
-				var providerDiscovered []discoveredInstance
-				for _, d := range m.discovered {
-					if d.provider.ID == provider.ID {
-						providerDiscovered = append(providerDiscovered, d)
-					}
-				}
-				if len(providerDiscovered) > 0 {
-					m.discovered = providerDiscovered
-					m.scanCursor = 0
-					m.scanSel = make(map[int]bool)
-					for i := range m.discovered {
-						m.scanSel[i] = true
-					}
-					m.currentView = providersViewScanHome
-					return m, nil
-				}
 				m.prepareAddInstance(provider)
 				m.currentView = providersViewAddInstance
 				return m, m.nameInput.Cursor.BlinkCmd()
