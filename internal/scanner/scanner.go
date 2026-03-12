@@ -105,6 +105,29 @@ func ParseDescription(content string) string {
 					desc := strings.TrimSpace(parts[1])
 					// Remove quotes if present
 					desc = strings.Trim(desc, "\"'")
+
+					// Handle YAML multiline scalars (> folded, | literal)
+					if desc == ">" || desc == "|" || desc == ">-" || desc == "|-" {
+						var multiParts []string
+						for j := i + 1; j < len(lines); j++ {
+							ml := lines[j]
+							if strings.TrimSpace(ml) == "---" {
+								break
+							}
+							// Continuation lines are indented
+							if len(ml) > 0 && (ml[0] == ' ' || ml[0] == '\t') {
+								multiParts = append(multiParts, strings.TrimSpace(ml))
+							} else {
+								break
+							}
+						}
+						if len(multiParts) > 0 {
+							return strings.Join(multiParts, " ")
+						}
+						// Empty multiline block, skip
+						continue
+					}
+
 					if desc != "" {
 						return desc
 					}
