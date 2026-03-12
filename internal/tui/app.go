@@ -13,6 +13,7 @@ const (
 	viewSkills
 	viewSources
 	viewProviders
+	viewTools
 )
 
 // navigateMsg is sent to switch the active view.
@@ -36,6 +37,7 @@ type App struct {
 	skills   skillsMenuModel
 	sources  sourcesMenuModel
 	providers providersMenuModel
+	tools    toolsMenuModel
 	width    int
 	height   int
 }
@@ -49,6 +51,7 @@ func NewApp(d *db.Database) App {
 		skills:    newSkillsMenu(d),
 		sources:   newSourcesMenu(d),
 		providers: newProvidersMenu(d),
+		tools:    newToolsMenu(d),
 	}
 }
 
@@ -68,6 +71,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case navigateMsg:
 		a.current = msg.target
+		// Refresh data when entering any sub-menu
+		switch msg.target {
+		case viewSkills:
+			a.skills.loadData()
+		case viewSources:
+			a.sources.loadSources()
+		case viewProviders:
+			a.providers.needsAutoScan = true
+			a.providers.loadData()
+		case viewTools:
+			a.tools.loadData()
+		case viewMain:
+			a.main.items = a.main.buildItems()
+		}
 		return a, nil
 
 	case tea.KeyMsg:
@@ -102,6 +119,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var m providersMenuModel
 		m, cmd = a.providers.update(msg)
 		a.providers = m
+	case viewTools:
+		var m toolsMenuModel
+		m, cmd = a.tools.update(msg)
+		a.tools = m
 	}
 	return a, cmd
 }
@@ -115,6 +136,8 @@ func (a App) View() string {
 		return a.sources.view()
 	case viewProviders:
 		return a.providers.view()
+	case viewTools:
+		return a.tools.view()
 	default:
 		return a.main.view()
 	}

@@ -72,6 +72,7 @@ func (m mainMenuModel) buildItems() []menuItem {
 		{label: "Skills", count: skillCount, view: viewSkills},
 		{label: "Sources", count: sourceCount, view: viewSources},
 		{label: "Providers", count: providerCount, view: viewProviders},
+		{label: "Tools", count: -1, view: viewTools},
 	}
 }
 
@@ -183,7 +184,12 @@ func (m mainMenuModel) view() string {
 
 	// Menu items
 	for i, item := range m.items {
-		line := fmt.Sprintf("  %s (%d)", item.label, item.count)
+		var line string
+		if item.count >= 0 {
+			line = fmt.Sprintf("  %s (%d)", item.label, item.count)
+		} else {
+			line = fmt.Sprintf("  %s", item.label)
+		}
 		if i == m.cursor {
 			sb.WriteString(selectedStyle.Render("> " + line[2:]))
 		} else {
