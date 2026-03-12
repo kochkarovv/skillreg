@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/vladyslav/skillreg/internal/db"
 	"github.com/vladyslav/skillreg/internal/linker"
 	"github.com/vladyslav/skillreg/internal/models"
@@ -17,19 +18,11 @@ import (
 type skillsView int
 
 const (
-	skillsViewList            skillsView = iota
-	skillsViewInstallSelect                     // pick a skill to install
-	skillsViewInstallTargets                    // multi-select instances
-	skillsViewUninstallSelect                   // multi-select installed skills to remove
-	skillsViewCollision                         // collision resolution
-	skillsViewConfirmUninstall                  // confirm uninstall
-)
-
-// Top-level action items in the skills list view.
-const (
-	skillsActionBrowse    = 0
-	skillsActionInstall   = 1
-	skillsActionUninstall = 2
+	skillsViewList           skillsView = iota
+	skillsViewPopup                            // install/uninstall popup for a skill
+	skillsViewInstallTargets                   // multi-select instances to install to
+	skillsViewCollision                        // collision resolution
+	skillsViewUninstallConfirm                 // confirm uninstall
 )
 
 // collisionChoice enumerates the user's options when a collision occurs.
@@ -52,52 +45,46 @@ type skillsMenuModel struct {
 
 	currentView skillsView
 
-	// Lookup maps built on load
+	// Lookup maps
 	sourceNames map[int64]string // sourceID → source name
+	instMap     map[int64][]string // skillID → list of instance names where installed
 
-	// Action row selection in list view
-	actionCursor int
-	actions      []string
-	inActions    bool // true when cursor is on action row area
+	// Tabs
+	tabs           []string // ["All", "source1", "source2", ...]
+	tabSourceIDs   []int64  // [0, sourceID1, sourceID2, ...] (0 = All)
+	activeTab      int
+	filteredSkills []*models.Skill
+
+	// Popup
+	popupSkill   *models.Skill
+	popupOptions []string
+	popupCursor  int
 
 	// Install flow
-	installSkills  []*models.Skill  // all available skills
-	installCursor  int
-	selectedSkill  *models.Skill    // chosen skill
+	selectedSkill  *models.Skill
 	instances      []*models.Instance
-	instanceSel    map[int]bool     // selected instance indices
+	instanceSel    map[int]bool
 	instanceCursor int
 
 	// Collision handling
-	collisionTarget    string            // target path that collided
-	collisionSource    string            // skill original path
-	collisionInstance  *models.Instance
-	collisionCursor    int
-	collisionOptions   []string
-	renameInput        textinput.Model
-	renameActive       bool
-	pendingInstalls    []pendingInstall  // remaining installs after collision
+	collisionTarget   string
+	collisionSource   string
+	collisionInstance *models.Instance
+	collisionCursor   int
+	collisionOptions  []string
+	renameInput       textinput.Model
+	renameActive      bool
+	pendingInstalls   []pendingInstall
 
 	// Uninstall flow
-	installations      []*installationRow
-	uninstallSel       map[int]bool
-	uninstallCursor    int
-
-	// Confirm uninstall
-	confirm components.ConfirmModel
+	skillInstallations []*models.Installation
+	confirm            components.ConfirmModel
 }
 
 // pendingInstall represents one install that still needs to happen.
 type pendingInstall struct {
 	skill    *models.Skill
 	instance *models.Instance
-}
-
-// installationRow is a display row for installations.
-type installationRow struct {
-	installation *models.Installation
-	skillName    string
-	instanceName string
 }
 
 // newSkillsMenu constructs a skillsMenuModel and loads skills from the DB.
@@ -108,9 +95,7 @@ func newSkillsMenu(d *db.Database) skillsMenuModel {
 
 	m := skillsMenuModel{
 		db:          d,
-		actions:     []string{"Browse all", "Install skill", "Uninstall skill"},
 		instanceSel: make(map[int]bool),
-		uninstallSel: make(map[int]bool),
 		renameInput: ti,
 		sourceNames: make(map[int64]string),
 	}
@@ -133,6 +118,36 @@ func (m *skillsMenuModel) loadData() {
 	for _, s := range sources {
 		m.sourceNames[s.ID] = s.Name
 	}
+
+	// Build installation map
+	m.instMap = m.buildInstallationMap()
+
+	// Build tabs
+	m.tabs = []string{"All"}
+	m.tabSourceIDs = []int64{0}
+	for _, s := range sources {
+		m.tabs = append(m.tabs, s.Name)
+		m.tabSourceIDs = append(m.tabSourceIDs, s.ID)
+	}
+
+	m.applyTabFilter()
+}
+
+func (m *skillsMenuModel) applyTabFilter() {
+	if m.activeTab == 0 || m.activeTab >= len(m.tabSourceIDs) {
+		m.filteredSkills = m.skills
+	} else {
+		srcID := m.tabSourceIDs[m.activeTab]
+		m.filteredSkills = nil
+		for _, sk := range m.skills {
+			if sk.SourceID == srcID {
+				m.filteredSkills = append(m.filteredSkills, sk)
+			}
+		}
+	}
+	if m.cursor >= len(m.filteredSkills) {
+		m.cursor = 0
+	}
 }
 
 func (m skillsMenuModel) skillDisplayName(sk *models.Skill) string {
@@ -143,25 +158,43 @@ func (m skillsMenuModel) skillDisplayName(sk *models.Skill) string {
 	return sk.Name
 }
 
-// totalListRows: actions + skills
-func (m skillsMenuModel) totalListRows() int {
-	return len(m.actions) + len(m.skills)
+func (m skillsMenuModel) isInstalled(sk *models.Skill) bool {
+	names, ok := m.instMap[sk.ID]
+	return ok && len(names) > 0
+}
+
+func (m skillsMenuModel) buildInstallationMap() map[int64][]string {
+	instMap := make(map[int64][]string)
+	installations, _ := models.ListAllInstallations(m.db)
+	instances, _ := models.ListAllInstances(m.db)
+
+	instNames := make(map[int64]string)
+	for _, inst := range instances {
+		instNames[inst.ID] = inst.Name
+	}
+
+	for _, installation := range installations {
+		name := instNames[installation.InstanceID]
+		if name == "" {
+			name = "unknown"
+		}
+		instMap[installation.SkillID] = append(instMap[installation.SkillID], name)
+	}
+	return instMap
 }
 
 func (m skillsMenuModel) update(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 	switch m.currentView {
 	case skillsViewList:
 		return m.updateList(msg)
-	case skillsViewInstallSelect:
-		return m.updateInstallSelect(msg)
+	case skillsViewPopup:
+		return m.updatePopup(msg)
 	case skillsViewInstallTargets:
 		return m.updateInstallTargets(msg)
-	case skillsViewUninstallSelect:
-		return m.updateUninstallSelect(msg)
 	case skillsViewCollision:
 		return m.updateCollision(msg)
-	case skillsViewConfirmUninstall:
-		return m.updateConfirmUninstall(msg)
+	case skillsViewUninstallConfirm:
+		return m.updateUninstallConfirm(msg)
 	}
 	return m, nil
 }
@@ -177,27 +210,32 @@ func (m skillsMenuModel) updateList(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < m.totalListRows()-1 {
+			if m.cursor < len(m.filteredSkills)-1 {
 				m.cursor++
 			}
+		case "tab":
+			if len(m.tabs) > 1 {
+				m.activeTab = (m.activeTab + 1) % len(m.tabs)
+				m.applyTabFilter()
+			}
+		case "shift+tab":
+			if len(m.tabs) > 1 {
+				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+				m.applyTabFilter()
+			}
 		case "enter":
-			if m.cursor < len(m.actions) {
-				// Action selected
-				switch m.cursor {
-				case skillsActionBrowse:
-					// Already showing all skills, do nothing special
-				case skillsActionInstall:
-					m.installSkills = m.skills
-					m.installCursor = 0
-					m.currentView = skillsViewInstallSelect
-					m.status = ""
-				case skillsActionUninstall:
-					m.loadInstallations()
-					m.uninstallCursor = 0
-					m.uninstallSel = make(map[int]bool)
-					m.currentView = skillsViewUninstallSelect
-					m.status = ""
+			if len(m.filteredSkills) > 0 && m.cursor < len(m.filteredSkills) {
+				sk := m.filteredSkills[m.cursor]
+				m.popupSkill = sk
+				m.popupCursor = 0
+				installed := m.isInstalled(sk)
+				if installed {
+					m.popupOptions = []string{"Install to more...", "Uninstall"}
+				} else {
+					m.popupOptions = []string{"Install"}
 				}
+				m.currentView = skillsViewPopup
+				m.status = ""
 			}
 		case "esc", "q":
 			return m, navigate(viewMain)
@@ -206,33 +244,64 @@ func (m skillsMenuModel) updateList(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 	return m, nil
 }
 
-// --- Install select view ---
+// --- Popup view ---
 
-func (m skillsMenuModel) updateInstallSelect(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
+func (m skillsMenuModel) updatePopup(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
-			if m.installCursor > 0 {
-				m.installCursor--
+			if m.popupCursor > 0 {
+				m.popupCursor--
 			}
 		case "down", "j":
-			if m.installCursor < len(m.installSkills)-1 {
-				m.installCursor++
+			if m.popupCursor < len(m.popupOptions)-1 {
+				m.popupCursor++
 			}
 		case "enter":
-			if len(m.installSkills) > 0 {
-				m.selectedSkill = m.installSkills[m.installCursor]
-				// Load instances
+			selected := m.popupOptions[m.popupCursor]
+			switch selected {
+			case "Install", "Install to more...":
+				m.selectedSkill = m.popupSkill
 				instances, _ := models.ListAllInstances(m.db)
 				m.instances = instances
 				m.instanceSel = make(map[int]bool)
+				// Pre-select all for fresh install, none for "install to more"
+				if selected == "Install" {
+					for i := range instances {
+						m.instanceSel[i] = true
+					}
+				}
 				m.instanceCursor = 0
 				m.currentView = skillsViewInstallTargets
+			case "Uninstall":
+				installs, _ := models.ListInstallationsBySkill(m.db, m.popupSkill.ID)
+				m.skillInstallations = installs
+				if len(installs) == 0 {
+					m.status = "No installations found"
+					m.currentView = skillsViewList
+					return m, nil
+				}
+				instanceNames := make(map[int64]string)
+				allInstances, _ := models.ListAllInstances(m.db)
+				for _, inst := range allInstances {
+					instanceNames[inst.ID] = inst.Name
+				}
+				var names []string
+				for _, inst := range installs {
+					name := instanceNames[inst.InstanceID]
+					if name == "" {
+						name = "unknown"
+					}
+					names = append(names, name)
+				}
+				m.confirm = components.NewConfirm(
+					fmt.Sprintf("Uninstall %q from %s?", m.popupSkill.Name, strings.Join(names, ", ")),
+				)
+				m.currentView = skillsViewUninstallConfirm
 			}
 		case "esc", "q":
 			m.currentView = skillsViewList
-			m.status = ""
 		}
 	}
 	return m, nil
@@ -241,8 +310,7 @@ func (m skillsMenuModel) updateInstallSelect(msg tea.Msg) (skillsMenuModel, tea.
 // --- Install targets view (multi-select instances) ---
 
 func (m skillsMenuModel) updateInstallTargets(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
-	// Extra rows: "Select all" at end
-	totalRows := len(m.instances) + 1
+	totalRows := len(m.instances) + 1 // +1 for "Select all" at top
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -256,10 +324,8 @@ func (m skillsMenuModel) updateInstallTargets(msg tea.Msg) (skillsMenuModel, tea
 				m.instanceCursor++
 			}
 		case " ":
-			if m.instanceCursor < len(m.instances) {
-				m.instanceSel[m.instanceCursor] = !m.instanceSel[m.instanceCursor]
-			} else {
-				// Select all toggle
+			if m.instanceCursor == 0 {
+				// Toggle all
 				allSelected := true
 				for i := range m.instances {
 					if !m.instanceSel[i] {
@@ -270,11 +336,14 @@ func (m skillsMenuModel) updateInstallTargets(msg tea.Msg) (skillsMenuModel, tea
 				for i := range m.instances {
 					m.instanceSel[i] = !allSelected
 				}
+			} else {
+				idx := m.instanceCursor - 1
+				m.instanceSel[idx] = !m.instanceSel[idx]
 			}
 		case "enter":
 			return m.executeInstall()
 		case "esc", "q":
-			m.currentView = skillsViewInstallSelect
+			m.currentView = skillsViewPopup
 			m.status = ""
 		}
 	}
@@ -311,7 +380,6 @@ func (m skillsMenuModel) processNextInstall() (skillsMenuModel, tea.Cmd) {
 
 		// Check for collision
 		if linker.ExistsAtTarget(targetPath) {
-			// Collision detected
 			m.collisionTarget = targetPath
 			m.collisionSource = p.skill.OriginalPath
 			m.collisionInstance = p.instance
@@ -326,13 +394,11 @@ func (m skillsMenuModel) processNextInstall() (skillsMenuModel, tea.Cmd) {
 				m.collisionOptions = []string{"Backup & replace", "Skip"}
 			}
 
-			// Put this install back as the first pending (we'll process it after resolution)
 			m.pendingInstalls = append([]pendingInstall{{skill: m.selectedSkill, instance: p.instance}}, m.pendingInstalls...)
 			m.currentView = skillsViewCollision
 			return m, nil
 		}
 
-		// No collision — create symlink and DB record
 		if err := linker.CreateSymlink(p.skill.OriginalPath, targetPath); err != nil {
 			m.status = fmt.Sprintf("Error creating symlink: %v", err)
 			continue
@@ -373,9 +439,8 @@ func (m skillsMenuModel) updateCollision(msg tea.Msg) (skillsMenuModel, tea.Cmd)
 		case "enter":
 			return m.executeCollisionChoice()
 		case "esc":
-			// Skip this collision entirely
 			if len(m.pendingInstalls) > 0 {
-				m.pendingInstalls = m.pendingInstalls[1:] // remove the colliding install
+				m.pendingInstalls = m.pendingInstalls[1:]
 			}
 			return m.processNextInstall()
 		}
@@ -392,7 +457,6 @@ func (m skillsMenuModel) updateCollisionRename(msg tea.Msg) (skillsMenuModel, te
 				m.status = "Name cannot be empty"
 				return m, nil
 			}
-			// Remove the colliding pending install and install with new name
 			if len(m.pendingInstalls) > 0 {
 				p := m.pendingInstalls[0]
 				m.pendingInstalls = m.pendingInstalls[1:]
@@ -464,87 +528,16 @@ func (m skillsMenuModel) executeCollisionChoice() (skillsMenuModel, tea.Cmd) {
 	return m, nil
 }
 
-// --- Uninstall select view ---
+// --- Uninstall confirm ---
 
-func (m *skillsMenuModel) loadInstallations() {
-	allInstalls, _ := models.ListAllInstallations(m.db)
-	allInstances, _ := models.ListAllInstances(m.db)
-
-	// Build instance name lookup
-	instNames := make(map[int64]string)
-	for _, inst := range allInstances {
-		instNames[inst.ID] = inst.Name
-	}
-
-	// Build skill name lookup
-	skillNames := make(map[int64]string)
-	for _, sk := range m.skills {
-		skillNames[sk.ID] = m.skillDisplayName(sk)
-	}
-
-	rows := make([]*installationRow, 0, len(allInstalls))
-	for _, inst := range allInstalls {
-		rows = append(rows, &installationRow{
-			installation: inst,
-			skillName:    skillNames[inst.SkillID],
-			instanceName: instNames[inst.InstanceID],
-		})
-	}
-	m.installations = rows
-}
-
-func (m skillsMenuModel) updateUninstallSelect(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if m.uninstallCursor > 0 {
-				m.uninstallCursor--
-			}
-		case "down", "j":
-			if m.uninstallCursor < len(m.installations)-1 {
-				m.uninstallCursor++
-			}
-		case " ":
-			if m.uninstallCursor < len(m.installations) {
-				m.uninstallSel[m.uninstallCursor] = !m.uninstallSel[m.uninstallCursor]
-			}
-		case "enter":
-			count := 0
-			for _, sel := range m.uninstallSel {
-				if sel {
-					count++
-				}
-			}
-			if count == 0 {
-				m.status = "No installations selected"
-				return m, nil
-			}
-			m.confirm = components.NewConfirm(
-				fmt.Sprintf("Remove %d installation(s)?", count),
-			)
-			m.currentView = skillsViewConfirmUninstall
-		case "esc", "q":
-			m.currentView = skillsViewList
-			m.status = ""
-		}
-	}
-	return m, nil
-}
-
-// --- Confirm uninstall ---
-
-func (m skillsMenuModel) updateConfirmUninstall(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
+func (m skillsMenuModel) updateUninstallConfirm(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case components.ConfirmResultMsg:
 		if msg.Confirmed {
 			removed := 0
-			for i, row := range m.installations {
-				if !m.uninstallSel[i] {
-					continue
-				}
-				_ = linker.RemoveSymlink(row.installation.SymlinkPath)
-				_ = models.DeleteInstallation(m.db, row.installation.ID)
+			for _, inst := range m.skillInstallations {
+				_ = linker.RemoveSymlink(inst.SymlinkPath)
+				_ = models.DeleteInstallation(m.db, inst.ID)
 				removed++
 			}
 			m.status = fmt.Sprintf("Removed %d installation(s)", removed)
@@ -565,16 +558,14 @@ func (m skillsMenuModel) updateConfirmUninstall(msg tea.Msg) (skillsMenuModel, t
 
 func (m skillsMenuModel) view() string {
 	switch m.currentView {
-	case skillsViewInstallSelect:
-		return m.viewInstallSelect()
+	case skillsViewPopup:
+		return m.viewPopup()
 	case skillsViewInstallTargets:
 		return m.viewInstallTargets()
-	case skillsViewUninstallSelect:
-		return m.viewUninstallSelect()
 	case skillsViewCollision:
 		return m.viewCollision()
-	case skillsViewConfirmUninstall:
-		return m.viewConfirmUninstall()
+	case skillsViewUninstallConfirm:
+		return m.viewUninstallConfirm()
 	default:
 		return m.viewList()
 	}
@@ -586,51 +577,55 @@ func (m skillsMenuModel) viewList() string {
 	sb.WriteString(titleStyle.Render("Skills"))
 	sb.WriteString("\n\n")
 
+	// Tab bar
+	if len(m.tabs) > 1 {
+		var tabParts []string
+		for i, label := range m.tabs {
+			if i == m.activeTab {
+				tabParts = append(tabParts, activeTabStyle.Render(label))
+			} else {
+				tabParts = append(tabParts, inactiveTabStyle.Render(label))
+			}
+		}
+		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, tabParts...))
+		sb.WriteString("\n\n")
+	}
+
 	if m.err != nil {
 		sb.WriteString(errorStyle.Render(fmt.Sprintf("Error loading skills: %v", m.err)))
 		sb.WriteString("\n")
-	} else {
-		// Action items
-		for i, action := range m.actions {
-			if i == m.cursor {
-				sb.WriteString(selectedStyle.Render("  > " + action))
-			} else {
-				sb.WriteString(subtleStyle.Render("    " + action))
-			}
-			sb.WriteString("\n")
-		}
+	} else if len(m.filteredSkills) == 0 {
+		sb.WriteString(subtleStyle.Render("  No skills found."))
 		sb.WriteString("\n")
-
-		// Skills list
-		if len(m.skills) == 0 {
-			sb.WriteString(subtleStyle.Render("  No skills found."))
-			sb.WriteString("\n")
-		} else {
-			// Build installation lookup: skillID → list of instance names
-			instMap := m.buildInstallationMap()
-
-			for i, sk := range m.skills {
-				rowIdx := len(m.actions) + i
-				name := m.skillDisplayName(sk)
-				desc := ""
-				if sk.Description != "" {
-					desc = " — " + sk.Description
-				}
-
-				// Show where installed
-				installedTo := ""
-				if names, ok := instMap[sk.ID]; ok && len(names) > 0 {
-					installedTo = successStyle.Render(" [" + strings.Join(names, ", ") + "]")
-				}
-
-				line := name + desc + installedTo
-				if rowIdx == m.cursor {
-					sb.WriteString(selectedStyle.Render("  > "+name+desc) + installedTo)
-				} else {
-					sb.WriteString(normalStyle.Render("    " + line))
-				}
-				sb.WriteString("\n")
+	} else {
+		for i, sk := range m.filteredSkills {
+			// Install status icon
+			var icon string
+			installed := m.isInstalled(sk)
+			if installed {
+				icon = successStyle.Render("● ")
+			} else {
+				icon = subtleStyle.Render("○ ")
 			}
+
+			name := m.skillDisplayName(sk)
+			desc := ""
+			if sk.Description != "" {
+				desc = " — " + sk.Description
+			}
+
+			// Show where installed
+			installedTo := ""
+			if names, ok := m.instMap[sk.ID]; ok && len(names) > 0 {
+				installedTo = successStyle.Render(" [" + strings.Join(names, ", ") + "]")
+			}
+
+			if i == m.cursor {
+				sb.WriteString(selectedStyle.Render("  > ") + icon + selectedStyle.Render(name+desc) + installedTo)
+			} else {
+				sb.WriteString(normalStyle.Render("    ") + icon + normalStyle.Render(name+desc) + installedTo)
+			}
+			sb.WriteString("\n")
 		}
 	}
 
@@ -639,59 +634,45 @@ func (m skillsMenuModel) viewList() string {
 		sb.WriteString(components.StatusBar(m.status, 60))
 		sb.WriteString("\n")
 	}
-	sb.WriteString(subtleStyle.Render("↑/↓ navigate • enter select • esc back"))
+	sb.WriteString(subtleStyle.Render("tab/shift+tab source • ↑/↓ navigate • enter select • esc back"))
 
 	return sb.String()
 }
 
-func (m skillsMenuModel) buildInstallationMap() map[int64][]string {
-	instMap := make(map[int64][]string)
-	installations, _ := models.ListAllInstallations(m.db)
-	instances, _ := models.ListAllInstances(m.db)
-
-	instNames := make(map[int64]string)
-	for _, inst := range instances {
-		instNames[inst.ID] = inst.Name
-	}
-
-	for _, installation := range installations {
-		name := instNames[installation.InstanceID]
-		if name == "" {
-			name = "unknown"
-		}
-		instMap[installation.SkillID] = append(instMap[installation.SkillID], name)
-	}
-	return instMap
-}
-
-func (m skillsMenuModel) viewInstallSelect() string {
+func (m skillsMenuModel) viewPopup() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Install Skill"))
+	sb.WriteString(titleStyle.Render("Skills"))
 	sb.WriteString("\n\n")
-	sb.WriteString("  Select a skill to install:\n\n")
 
-	if len(m.installSkills) == 0 {
-		sb.WriteString(subtleStyle.Render("  No skills available."))
-		sb.WriteString("\n")
-	} else {
-		for i, sk := range m.installSkills {
-			name := m.skillDisplayName(sk)
-			desc := ""
-			if sk.Description != "" {
-				desc = subtleStyle.Render(" — " + sk.Description)
-			}
-			if i == m.installCursor {
-				sb.WriteString(selectedStyle.Render("  > " + name) + desc)
-			} else {
-				sb.WriteString(normalStyle.Render("    " + name) + desc)
-			}
-			sb.WriteString("\n")
-		}
+	sk := m.popupSkill
+	name := m.skillDisplayName(sk)
+
+	var popupContent strings.Builder
+	popupContent.WriteString(fmt.Sprintf("  %s\n", name))
+	if sk.Description != "" {
+		popupContent.WriteString(fmt.Sprintf("  %s\n", subtleStyle.Render(sk.Description)))
 	}
 
-	sb.WriteString("\n")
-	sb.WriteString(subtleStyle.Render("  ↑/↓ navigate • enter select • esc back"))
+	// Show where installed
+	if names, ok := m.instMap[sk.ID]; ok && len(names) > 0 {
+		popupContent.WriteString(fmt.Sprintf("  Installed: %s\n", successStyle.Render(strings.Join(names, ", "))))
+	}
+
+	popupContent.WriteString("\n")
+	for i, opt := range m.popupOptions {
+		if i == m.popupCursor {
+			popupContent.WriteString(selectedStyle.Render("  > " + opt))
+		} else {
+			popupContent.WriteString(normalStyle.Render("    " + opt))
+		}
+		popupContent.WriteString("\n")
+	}
+
+	sb.WriteString(boxStyle.Render(popupContent.String()))
+
+	sb.WriteString("\n\n")
+	sb.WriteString(subtleStyle.Render("↑/↓ navigate • enter confirm • esc cancel"))
 
 	return sb.String()
 }
@@ -707,61 +688,25 @@ func (m skillsMenuModel) viewInstallTargets() string {
 		sb.WriteString(subtleStyle.Render("  No instances found. Add one in the Providers menu."))
 		sb.WriteString("\n")
 	} else {
-		for i, inst := range m.instances {
-			check := "[ ]"
-			if m.instanceSel[i] {
-				check = "[x]"
-			}
-			line := fmt.Sprintf("%s %s  %s", check, inst.Name, subtleStyle.Render(inst.GlobalSkillsPath))
-			if i == m.instanceCursor {
-				sb.WriteString(selectedStyle.Render("  > "+check+" "+inst.Name) + "  " + subtleStyle.Render(inst.GlobalSkillsPath))
-			} else {
-				sb.WriteString(normalStyle.Render("    " + line))
-			}
-			sb.WriteString("\n")
-		}
-
-		// Select all row
-		allIdx := len(m.instances)
+		// Select all at top
 		allLabel := "Select all"
-		if m.instanceCursor == allIdx {
+		if m.instanceCursor == 0 {
 			sb.WriteString(selectedStyle.Render("  > " + allLabel))
 		} else {
 			sb.WriteString(subtleStyle.Render("    " + allLabel))
 		}
 		sb.WriteString("\n")
-	}
 
-	sb.WriteString("\n")
-	if m.status != "" {
-		sb.WriteString(warningStyle.Render("  " + m.status))
-		sb.WriteString("\n")
-	}
-	sb.WriteString(subtleStyle.Render("  space toggle • enter confirm • esc back"))
-
-	return sb.String()
-}
-
-func (m skillsMenuModel) viewUninstallSelect() string {
-	var sb strings.Builder
-
-	sb.WriteString(titleStyle.Render("Uninstall Skills"))
-	sb.WriteString("\n\n")
-
-	if len(m.installations) == 0 {
-		sb.WriteString(subtleStyle.Render("  No installations found."))
-		sb.WriteString("\n")
-	} else {
-		sb.WriteString("  Select installation(s) to remove:\n\n")
-		for i, row := range m.installations {
+		for i, inst := range m.instances {
 			check := "[ ]"
-			if m.uninstallSel[i] {
+			if m.instanceSel[i] {
 				check = "[x]"
 			}
-			line := fmt.Sprintf("%s %s → %s", check, row.skillName, row.instanceName)
-			if i == m.uninstallCursor {
-				sb.WriteString(selectedStyle.Render("  > " + line))
+			rowIdx := i + 1
+			if rowIdx == m.instanceCursor {
+				sb.WriteString(selectedStyle.Render("  > "+check+" "+inst.Name) + "  " + subtleStyle.Render(inst.GlobalSkillsPath))
 			} else {
+				line := fmt.Sprintf("%s %s  %s", check, inst.Name, subtleStyle.Render(inst.GlobalSkillsPath))
 				sb.WriteString(normalStyle.Render("    " + line))
 			}
 			sb.WriteString("\n")
@@ -809,7 +754,7 @@ func (m skillsMenuModel) viewCollision() string {
 	return sb.String()
 }
 
-func (m skillsMenuModel) viewConfirmUninstall() string {
+func (m skillsMenuModel) viewUninstallConfirm() string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Confirm Uninstall"))
 	sb.WriteString("\n")
