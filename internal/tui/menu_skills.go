@@ -37,11 +37,13 @@ const (
 
 // skillsMenuModel is the BubbleTea model for the skills screen.
 type skillsMenuModel struct {
-	db     *db.Database
-	skills []*models.Skill
-	cursor int
-	err    error
-	status string
+	db           *db.Database
+	skills       []*models.Skill
+	cursor       int
+	err          error
+	status       string
+	height       int // terminal height
+	scrollOffset int // first visible item index
 
 	currentView skillsView
 
@@ -54,6 +56,11 @@ type skillsMenuModel struct {
 	tabSourceIDs   []int64  // [0, sourceID1, sourceID2, ...] (0 = All)
 	activeTab      int
 	filteredSkills []*models.Skill
+
+	// Search
+	searchInput  textinput.Model
+	searching    bool
+	searchQuery  string
 
 	// Popup
 	popupSkill   *models.Skill
@@ -93,10 +100,15 @@ func newSkillsMenu(d *db.Database) skillsMenuModel {
 	ti.Placeholder = "New name..."
 	ti.CharLimit = 256
 
+	si := textinput.New()
+	si.Placeholder = "Search skills..."
+	si.CharLimit = 256
+
 	m := skillsMenuModel{
 		db:          d,
 		instanceSel: make(map[int]bool),
 		renameInput: ti,
+		searchInput: si,
 		sourceNames: make(map[int64]string),
 	}
 	m.loadData()
@@ -104,6 +116,9 @@ func newSkillsMenu(d *db.Database) skillsMenuModel {
 }
 
 func (m *skillsMenuModel) loadData() {
+	// Sync all sources to pick up moved/added/removed skills
+	_ = models.SyncAllSources(m.db)
+
 	skills, err := models.ListAllSkills(m.db)
 	if err != nil {
 		m.err = err
@@ -134,19 +149,65 @@ func (m *skillsMenuModel) loadData() {
 }
 
 func (m *skillsMenuModel) applyTabFilter() {
+	var base []*models.Skill
 	if m.activeTab == 0 || m.activeTab >= len(m.tabSourceIDs) {
-		m.filteredSkills = m.skills
+		base = m.skills
 	} else {
 		srcID := m.tabSourceIDs[m.activeTab]
-		m.filteredSkills = nil
 		for _, sk := range m.skills {
 			if sk.SourceID == srcID {
-				m.filteredSkills = append(m.filteredSkills, sk)
+				base = append(base, sk)
 			}
 		}
 	}
+
+	// Apply search filter
+	if m.searchQuery != "" {
+		q := strings.ToLower(m.searchQuery)
+		m.filteredSkills = nil
+		for _, sk := range base {
+			if strings.Contains(strings.ToLower(sk.Name), q) ||
+				strings.Contains(strings.ToLower(sk.Description), q) {
+				m.filteredSkills = append(m.filteredSkills, sk)
+			}
+		}
+	} else {
+		m.filteredSkills = base
+	}
+
 	if m.cursor >= len(m.filteredSkills) {
 		m.cursor = 0
+	}
+	m.scrollOffset = 0
+}
+
+// visibleCount returns how many skill items fit in the viewport.
+// Each skill takes 2 lines (name + description), minus header/footer chrome.
+func (m skillsMenuModel) visibleCount() int {
+	// Header: title (1) + blank (1) + tabs (1) + blank (1) = 4 lines
+	// Footer: blank (1) + status (1) + help (1) = 3 lines
+	chrome := 7
+	if len(m.tabs) <= 1 {
+		chrome -= 2 // no tab bar
+	}
+	available := m.height - chrome
+	if available < 2 {
+		available = 2
+	}
+	// Each skill = 2 lines (name row + description row)
+	return available / 2
+}
+
+func (m *skillsMenuModel) adjustScroll() {
+	visible := m.visibleCount()
+	if visible <= 0 {
+		return
+	}
+	if m.cursor < m.scrollOffset {
+		m.scrollOffset = m.cursor
+	}
+	if m.cursor >= m.scrollOffset+visible {
+		m.scrollOffset = m.cursor - visible + 1
 	}
 }
 
@@ -204,14 +265,54 @@ func (m skillsMenuModel) update(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 func (m skillsMenuModel) updateList(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Search mode: delegate most keys to the text input
+		if m.searching {
+			switch msg.String() {
+			case "esc":
+				m.searching = false
+				m.searchInput.Blur()
+				m.searchQuery = ""
+				m.searchInput.SetValue("")
+				m.applyTabFilter()
+				return m, nil
+			case "enter":
+				m.searching = false
+				m.searchInput.Blur()
+				return m, nil
+			case "up", "down":
+				// Allow navigation while search is active
+				m.searching = false
+				m.searchInput.Blur()
+				// Fall through to normal key handling below
+			default:
+				var cmd tea.Cmd
+				m.searchInput, cmd = m.searchInput.Update(msg)
+				m.searchQuery = m.searchInput.Value()
+				m.applyTabFilter()
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				m.adjustScroll()
 			}
 		case "down", "j":
 			if m.cursor < len(m.filteredSkills)-1 {
 				m.cursor++
+				m.adjustScroll()
+			}
+		case "left", "h":
+			if len(m.tabs) > 1 {
+				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
+				m.applyTabFilter()
+			}
+		case "right", "l":
+			if len(m.tabs) > 1 {
+				m.activeTab = (m.activeTab + 1) % len(m.tabs)
+				m.applyTabFilter()
 			}
 		case "tab":
 			if len(m.tabs) > 1 {
@@ -223,6 +324,10 @@ func (m skillsMenuModel) updateList(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 				m.activeTab = (m.activeTab - 1 + len(m.tabs)) % len(m.tabs)
 				m.applyTabFilter()
 			}
+		case "/":
+			m.searching = true
+			m.searchInput.Focus()
+			return m, nil
 		case "enter":
 			if len(m.filteredSkills) > 0 && m.cursor < len(m.filteredSkills) {
 				sk := m.filteredSkills[m.cursor]
@@ -237,7 +342,21 @@ func (m skillsMenuModel) updateList(msg tea.Msg) (skillsMenuModel, tea.Cmd) {
 				m.currentView = skillsViewPopup
 				m.status = ""
 			}
-		case "esc", "q":
+		case "esc":
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				m.searchInput.SetValue("")
+				m.applyTabFilter()
+				return m, nil
+			}
+			return m, navigate(viewMain)
+		case "q":
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				m.searchInput.SetValue("")
+				m.applyTabFilter()
+				return m, nil
+			}
 			return m, navigate(viewMain)
 		}
 	}
@@ -598,7 +717,20 @@ func (m skillsMenuModel) viewList() string {
 		sb.WriteString(subtleStyle.Render("  No skills found."))
 		sb.WriteString("\n")
 	} else {
-		for i, sk := range m.filteredSkills {
+		total := len(m.filteredSkills)
+		visible := m.visibleCount()
+		end := m.scrollOffset + visible
+		if end > total {
+			end = total
+		}
+
+		if m.scrollOffset > 0 {
+			sb.WriteString(subtleStyle.Render("    ↑ more"))
+			sb.WriteString("\n")
+		}
+
+		for i := m.scrollOffset; i < end; i++ {
+			sk := m.filteredSkills[i]
 			// Install status icon
 			var icon string
 			installed := m.isInstalled(sk)
@@ -609,10 +741,6 @@ func (m skillsMenuModel) viewList() string {
 			}
 
 			name := m.skillDisplayName(sk)
-			desc := ""
-			if sk.Description != "" {
-				desc = " — " + sk.Description
-			}
 
 			// Show where installed
 			installedTo := ""
@@ -620,21 +748,40 @@ func (m skillsMenuModel) viewList() string {
 				installedTo = successStyle.Render(" [" + strings.Join(names, ", ") + "]")
 			}
 
+			// Row 1: name + installations
 			if i == m.cursor {
-				sb.WriteString(selectedStyle.Render("  > ") + icon + selectedStyle.Render(name+desc) + installedTo)
+				sb.WriteString(selectedStyle.Render("  > ") + icon + selectedStyle.Render(name) + installedTo)
 			} else {
-				sb.WriteString(normalStyle.Render("    ") + icon + normalStyle.Render(name+desc) + installedTo)
+				sb.WriteString(normalStyle.Render("    ") + icon + normalStyle.Render(name) + installedTo)
 			}
+			sb.WriteString("\n")
+
+			// Row 2: description (indented)
+			if sk.Description != "" {
+				sb.WriteString(subtleStyle.Render("      " + sk.Description))
+				sb.WriteString("\n")
+			}
+		}
+
+		if end < total {
+			sb.WriteString(subtleStyle.Render("    ↓ more"))
 			sb.WriteString("\n")
 		}
 	}
 
 	sb.WriteString("\n")
+	if m.searching {
+		sb.WriteString("  " + m.searchInput.View())
+		sb.WriteString("\n")
+	} else if m.searchQuery != "" {
+		sb.WriteString(subtleStyle.Render(fmt.Sprintf("  filter: %q (esc to clear)", m.searchQuery)))
+		sb.WriteString("\n")
+	}
 	if m.status != "" {
 		sb.WriteString(components.StatusBar(m.status, 60))
 		sb.WriteString("\n")
 	}
-	sb.WriteString(subtleStyle.Render("tab/shift+tab source • ↑/↓ navigate • enter select • esc back"))
+	sb.WriteString(subtleStyle.Render("←/→ source • ↑/↓ navigate • / search • enter select • esc back"))
 
 	return sb.String()
 }
