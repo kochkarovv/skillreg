@@ -1,10 +1,15 @@
 package updater
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -110,4 +115,104 @@ func parseVersion(v string) [3]int {
 		result[i] = n
 	}
 	return result
+}
+
+// Apply downloads the release asset for the current platform and replaces
+// the binary at execPath. If execPath is empty, it uses os.Executable().
+func Apply(rel *Release, execPath string) error {
+	assetURL := rel.AssetURL()
+	if assetURL == "" {
+		return fmt.Errorf("no asset found for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	if execPath == "" {
+		var err error
+		execPath, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate executable: %w", err)
+		}
+		execPath, err = filepath.EvalSymlinks(execPath)
+		if err != nil {
+			return fmt.Errorf("resolve symlinks: %w", err)
+		}
+	}
+
+	resp, err := http.Get(assetURL)
+	if err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+
+	newBinary, err := extractBinary(resp.Body)
+	if err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+
+	// Write new binary to temp file in the same directory
+	dir := filepath.Dir(execPath)
+	tmpFile, err := os.CreateTemp(dir, "skillreg-update-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(newBinary); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod: %w", err)
+	}
+
+	// Atomic-ish replace: rename current → .old, rename new → current
+	oldPath := execPath + ".old"
+	os.Remove(oldPath) // clean up from any previous failed update
+
+	if err := os.Rename(execPath, oldPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("backup current binary: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, execPath); err != nil {
+		// Restore the old binary
+		os.Rename(oldPath, execPath)
+		return fmt.Errorf("replace binary: %w", err)
+	}
+
+	// Clean up old binary (best-effort)
+	os.Remove(oldPath)
+	return nil
+}
+
+// extractBinary reads a tar.gz stream and returns the content of the "skillreg" file.
+func extractBinary(r io.Reader) ([]byte, error) {
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.Base(hdr.Name)
+		if name == "skillreg" || name == "skillreg.exe" {
+			return io.ReadAll(tr)
+		}
+	}
+	return nil, fmt.Errorf("binary not found in archive")
 }

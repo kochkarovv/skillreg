@@ -1,6 +1,13 @@
 package updater
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -79,5 +86,102 @@ func TestRelease_Version(t *testing.T) {
 	rel := Release{TagName: "v1.2.3"}
 	if v := rel.Version(); v != "1.2.3" {
 		t.Errorf("Version() = %q, want %q", v, "1.2.3")
+	}
+}
+
+func createTestTarGz(t *testing.T, name string, content []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	hdr := &tar.Header{
+		Name: name,
+		Mode: 0755,
+		Size: int64(len(content)),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gw.Close()
+	return buf.Bytes()
+}
+
+func TestApply(t *testing.T) {
+	newContent := []byte("#!/bin/sh\necho new-version\n")
+	archiveData := createTestTarGz(t, "skillreg", newContent)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(archiveData)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	currentBin := filepath.Join(tmpDir, "skillreg")
+	os.WriteFile(currentBin, []byte("old-version"), 0755)
+
+	rel := &Release{
+		TagName: "v0.3.0",
+		Assets: []Asset{
+			{
+				Name:               "skillreg_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz",
+				BrowserDownloadURL: srv.URL + "/skillreg.tar.gz",
+			},
+		},
+	}
+
+	err := Apply(rel, currentBin)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	data, err := os.ReadFile(currentBin)
+	if err != nil {
+		t.Fatalf("read updated binary: %v", err)
+	}
+	if string(data) != string(newContent) {
+		t.Errorf("binary content = %q, want %q", string(data), string(newContent))
+	}
+
+	// Verify .old was cleaned up
+	if _, err := os.Stat(currentBin + ".old"); err == nil {
+		t.Error("expected .old file to be removed")
+	}
+}
+
+func TestApply_NoAsset(t *testing.T) {
+	rel := &Release{
+		TagName: "v0.3.0",
+		Assets:  []Asset{},
+	}
+	err := Apply(rel, "/tmp/fake")
+	if err == nil {
+		t.Error("expected error for missing asset")
+	}
+}
+
+func TestExtractBinary(t *testing.T) {
+	expected := []byte("binary-content")
+	archiveData := createTestTarGz(t, "skillreg", expected)
+
+	got, err := extractBinary(bytes.NewReader(archiveData))
+	if err != nil {
+		t.Fatalf("extractBinary failed: %v", err)
+	}
+	if string(got) != string(expected) {
+		t.Errorf("got %q, want %q", string(got), string(expected))
+	}
+}
+
+func TestExtractBinary_NotFound(t *testing.T) {
+	archiveData := createTestTarGz(t, "wrong-name", []byte("data"))
+
+	_, err := extractBinary(bytes.NewReader(archiveData))
+	if err == nil {
+		t.Error("expected error when binary not found in archive")
 	}
 }
