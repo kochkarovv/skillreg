@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/vladyslav/skillreg/internal/db"
 	"github.com/vladyslav/skillreg/internal/git"
+	"github.com/vladyslav/skillreg/internal/linker"
 	"github.com/vladyslav/skillreg/internal/models"
 	"github.com/vladyslav/skillreg/internal/scanner"
 	"github.com/vladyslav/skillreg/internal/tui/components"
@@ -20,12 +21,14 @@ import (
 type sourcesView int
 
 const (
-	sourcesViewList       sourcesView = iota
-	sourcesViewDetail                         // selected source: actions
-	sourcesViewAddPath                        // text input for repo path
-	sourcesViewAddConfirm                     // show discovered skills, confirm
-	sourcesViewPullOptions                    // options when pull fails
-	sourcesViewConfirmRemove                  // confirm removal
+	sourcesViewList            sourcesView = iota
+	sourcesViewDetail                              // selected source: actions
+	sourcesViewAddPath                             // text input for repo path
+	sourcesViewAddConfirm                          // show discovered skills, confirm
+	sourcesViewInstallPick                         // pick skills from new source to install
+	sourcesViewInstallTargets                      // pick target instances
+	sourcesViewPullOptions                         // options when pull fails
+	sourcesViewConfirmRemove                       // confirm removal
 )
 
 // Detail actions for a selected source.
@@ -79,6 +82,19 @@ type sourcesMenuModel struct {
 	discoveredSkills []scanner.DiscoveredSkill
 	addRepoPath     string // validated absolute path
 	addRepoRemote   string
+
+	// Tab completion
+	completions    []string // current set of matching paths
+	completionIdx  int      // index into completions for cycling
+	completionBase string   // the text that was completed from
+
+	// Post-add install flow
+	newSourceSkills []*models.Skill    // skills from newly added source
+	skillSel        map[int]bool       // selected skill indices
+	skillCursor     int
+	installInstances []*models.Instance // all instances for target selection
+	installSel       map[int]bool      // selected instance indices
+	installCursor    int
 
 	// Pull options view
 	pullCursor  int
@@ -142,6 +158,10 @@ func (m sourcesMenuModel) update(msg tea.Msg) (sourcesMenuModel, tea.Cmd) {
 		return m.updateAddPath(msg)
 	case sourcesViewAddConfirm:
 		return m.updateAddConfirm(msg)
+	case sourcesViewInstallPick:
+		return m.updateInstallPick(msg)
+	case sourcesViewInstallTargets:
+		return m.updateInstallTargets(msg)
 	case sourcesViewPullOptions:
 		return m.updatePullOptions(msg)
 	case sourcesViewConfirmRemove:
@@ -173,10 +193,16 @@ func (m sourcesMenuModel) updateList(msg tea.Msg) (sourcesMenuModel, tea.Cmd) {
 				m.detailCursor = 0
 				m.currentView = sourcesViewDetail
 			} else {
-				// [Add source]
-				m.pathInput.SetValue("")
+				// [Add source] — prefill with home directory
+				home, _ := os.UserHomeDir()
+				if home == "" {
+					home = "/"
+				}
+				m.pathInput.SetValue(home + "/")
+				m.pathInput.CursorEnd()
 				m.pathInput.Focus()
 				m.status = ""
+				m.completions = nil
 				m.currentView = sourcesViewAddPath
 				return m, m.pathInput.Cursor.BlinkCmd()
 			}
@@ -401,6 +427,10 @@ func (m sourcesMenuModel) updateAddPath(msg tea.Msg) (sourcesMenuModel, tea.Cmd)
 			m.status = ""
 			return m, nil
 
+		case "tab":
+			m.handleTabCompletion()
+			return m, nil
+
 		case "esc":
 			m.currentView = sourcesViewList
 			m.status = ""
@@ -408,10 +438,74 @@ func (m sourcesMenuModel) updateAddPath(msg tea.Msg) (sourcesMenuModel, tea.Cmd)
 		}
 	}
 
+	// Any non-tab key resets completion state
+	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() != "tab" {
+		m.completions = nil
+	}
+
 	// Delegate to textinput
 	var cmd tea.Cmd
 	m.pathInput, cmd = m.pathInput.Update(msg)
 	return m, cmd
+}
+
+// handleTabCompletion implements filesystem path tab-completion.
+func (m *sourcesMenuModel) handleTabCompletion() {
+	current := m.pathInput.Value()
+
+	// If we already have completions and the base hasn't changed, cycle through them
+	if len(m.completions) > 0 && m.completionBase == current {
+		m.completionIdx = (m.completionIdx + 1) % len(m.completions)
+		m.pathInput.SetValue(m.completions[m.completionIdx])
+		m.pathInput.CursorEnd()
+		m.completionBase = m.pathInput.Value()
+		return
+	}
+
+	// Build fresh completions
+	expanded := expandPath(current)
+
+	var dir, prefix string
+	if strings.HasSuffix(current, "/") {
+		// User typed a trailing slash — list that directory
+		dir = expanded
+		prefix = ""
+	} else {
+		dir = filepath.Dir(expanded)
+		prefix = filepath.Base(expanded)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		m.status = "Cannot read directory"
+		return
+	}
+
+	var matches []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			continue
+		}
+		fullPath := filepath.Join(dir, name) + "/"
+		matches = append(matches, fullPath)
+	}
+
+	if len(matches) == 0 {
+		m.status = "No matches"
+		m.completions = nil
+		return
+	}
+
+	m.completions = matches
+	m.completionIdx = 0
+	m.pathInput.SetValue(matches[0])
+	m.pathInput.CursorEnd()
+	m.completionBase = m.pathInput.Value()
+	m.status = fmt.Sprintf("%d match(es) — tab to cycle", len(matches))
 }
 
 // --- Add confirm view ---
@@ -429,11 +523,30 @@ func (m sourcesMenuModel) updateAddConfirm(msg tea.Msg) (sourcesMenuModel, tea.C
 				m.currentView = sourcesViewList
 				return m, nil
 			}
+			var createdSkills []*models.Skill
 			for _, sk := range m.discoveredSkills {
-				_, _ = models.CreateSkill(m.db, src.ID, sk.Name, sk.Path, sk.Description)
+				created, err := models.CreateSkill(m.db, src.ID, sk.Name, sk.Path, sk.Description)
+				if err == nil {
+					createdSkills = append(createdSkills, created)
+				}
 			}
-			m.status = fmt.Sprintf("Added source %q with %d skill(s)", name, len(m.discoveredSkills))
 			m.loadSources()
+
+			// If there are skills and instances, offer to install them
+			instances, _ := models.ListAllInstances(m.db)
+			if len(createdSkills) > 0 && len(instances) > 0 {
+				m.newSourceSkills = createdSkills
+				m.skillSel = make(map[int]bool)
+				for i := range createdSkills {
+					m.skillSel[i] = true // pre-select all
+				}
+				m.skillCursor = 0
+				m.status = fmt.Sprintf("Added source %q — select skills to install:", name)
+				m.currentView = sourcesViewInstallPick
+				return m, nil
+			}
+
+			m.status = fmt.Sprintf("Added source %q with %d skill(s)", name, len(createdSkills))
 			m.currentView = sourcesViewList
 			return m, nil
 
@@ -484,6 +597,10 @@ func (m sourcesMenuModel) view() string {
 		return m.viewAddPath()
 	case sourcesViewAddConfirm:
 		return m.viewAddConfirm()
+	case sourcesViewInstallPick:
+		return m.viewInstallPick()
+	case sourcesViewInstallTargets:
+		return m.viewInstallTargets()
 	case sourcesViewPullOptions:
 		return m.viewPullOptions()
 	case sourcesViewConfirmRemove:
@@ -596,7 +713,7 @@ func (m sourcesMenuModel) viewAddPath() string {
 		sb.WriteString(errorStyle.Render("  " + m.status))
 		sb.WriteString("\n\n")
 	}
-	sb.WriteString(subtleStyle.Render("  enter confirm • esc cancel"))
+	sb.WriteString(subtleStyle.Render("  tab autocomplete • enter confirm • esc cancel"))
 
 	return sb.String()
 }
@@ -659,6 +776,225 @@ func (m sourcesMenuModel) viewConfirmRemove() string {
 	sb.WriteString(m.confirm.View())
 	sb.WriteString("\n")
 	sb.WriteString(subtleStyle.Render("  ←/→ switch • y/n shortcut • enter confirm"))
+
+	return sb.String()
+}
+
+// --- Post-add install: pick skills ---
+
+func (m sourcesMenuModel) updateInstallPick(msg tea.Msg) (sourcesMenuModel, tea.Cmd) {
+	totalRows := len(m.newSourceSkills) + 1 // +1 for "Select all" at top
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.skillCursor > 0 {
+				m.skillCursor--
+			}
+		case "down", "j":
+			if m.skillCursor < totalRows-1 {
+				m.skillCursor++
+			}
+		case " ":
+			if m.skillCursor == 0 {
+				// Toggle all
+				allSelected := true
+				for i := range m.newSourceSkills {
+					if !m.skillSel[i] {
+						allSelected = false
+						break
+					}
+				}
+				for i := range m.newSourceSkills {
+					m.skillSel[i] = !allSelected
+				}
+			} else {
+				idx := m.skillCursor - 1
+				m.skillSel[idx] = !m.skillSel[idx]
+			}
+		case "enter":
+			var selected []*models.Skill
+			for i, sk := range m.newSourceSkills {
+				if m.skillSel[i] {
+					selected = append(selected, sk)
+				}
+			}
+			if len(selected) == 0 {
+				m.status = "Source added. No skills selected for install."
+				m.currentView = sourcesViewList
+				return m, nil
+			}
+			instances, _ := models.ListAllInstances(m.db)
+			m.installInstances = instances
+			m.installSel = make(map[int]bool)
+			for i := range instances {
+				m.installSel[i] = true
+			}
+			m.installCursor = 0
+			m.status = ""
+			m.currentView = sourcesViewInstallTargets
+		case "esc":
+			m.status = "Source added. Skipped install."
+			m.currentView = sourcesViewList
+		}
+	}
+	return m, nil
+}
+
+// --- Post-add install: pick instances ---
+
+func (m sourcesMenuModel) updateInstallTargets(msg tea.Msg) (sourcesMenuModel, tea.Cmd) {
+	totalRows := len(m.installInstances) + 1 // +1 for "Select all" at top
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.installCursor > 0 {
+				m.installCursor--
+			}
+		case "down", "j":
+			if m.installCursor < totalRows-1 {
+				m.installCursor++
+			}
+		case " ":
+			if m.installCursor == 0 {
+				allSelected := true
+				for i := range m.installInstances {
+					if !m.installSel[i] {
+						allSelected = false
+						break
+					}
+				}
+				for i := range m.installInstances {
+					m.installSel[i] = !allSelected
+				}
+			} else {
+				idx := m.installCursor - 1
+				m.installSel[idx] = !m.installSel[idx]
+			}
+		case "enter":
+			installed := 0
+			skipped := 0
+			for si, sk := range m.newSourceSkills {
+				if !m.skillSel[si] {
+					continue
+				}
+				for ii, inst := range m.installInstances {
+					if !m.installSel[ii] {
+						continue
+					}
+					targetPath := filepath.Join(inst.GlobalSkillsPath, sk.Name)
+					if linker.ExistsAtTarget(targetPath) {
+						skipped++
+						continue
+					}
+					if err := linker.CreateSymlink(sk.OriginalPath, targetPath); err != nil {
+						skipped++
+						continue
+					}
+					_, _ = models.CreateInstallation(m.db, sk.ID, inst.ID, targetPath, sk.Name)
+					installed++
+				}
+			}
+			if skipped > 0 {
+				m.status = fmt.Sprintf("Installed %d symlink(s), skipped %d collision(s)", installed, skipped)
+			} else {
+				m.status = fmt.Sprintf("Installed %d symlink(s)", installed)
+			}
+			m.currentView = sourcesViewList
+		case "esc":
+			m.status = "Source added. Skipped install."
+			m.currentView = sourcesViewList
+		}
+	}
+	return m, nil
+}
+
+// --- Post-add install views ---
+
+func (m sourcesMenuModel) viewInstallPick() string {
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("Install Skills"))
+	sb.WriteString("\n\n")
+	sb.WriteString("  Select skills to install:\n\n")
+
+	// Select all at top
+	allLabel := "Select all"
+	if m.skillCursor == 0 {
+		sb.WriteString(selectedStyle.Render("  > " + allLabel))
+	} else {
+		sb.WriteString(subtleStyle.Render("    " + allLabel))
+	}
+	sb.WriteString("\n")
+
+	for i, sk := range m.newSourceSkills {
+		check := "[ ]"
+		if m.skillSel[i] {
+			check = "[x]"
+		}
+		desc := ""
+		if sk.Description != "" {
+			desc = subtleStyle.Render(" — " + sk.Description)
+		}
+		rowIdx := i + 1
+		if rowIdx == m.skillCursor {
+			sb.WriteString(selectedStyle.Render(fmt.Sprintf("  > %s %s", check, sk.Name)) + desc)
+		} else {
+			sb.WriteString(normalStyle.Render(fmt.Sprintf("    %s %s", check, sk.Name)) + desc)
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\n")
+	if m.status != "" {
+		sb.WriteString(successStyle.Render("  " + m.status))
+		sb.WriteString("\n")
+	}
+	sb.WriteString(subtleStyle.Render("  space toggle • enter continue • esc skip"))
+
+	return sb.String()
+}
+
+func (m sourcesMenuModel) viewInstallTargets() string {
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("Install To"))
+	sb.WriteString("\n\n")
+	sb.WriteString("  Select target instance(s):\n\n")
+
+	if len(m.installInstances) == 0 {
+		sb.WriteString(subtleStyle.Render("  No instances found. Add one in the Providers menu."))
+		sb.WriteString("\n")
+	} else {
+		// Select all at top
+		allLabel := "Select all"
+		if m.installCursor == 0 {
+			sb.WriteString(selectedStyle.Render("  > " + allLabel))
+		} else {
+			sb.WriteString(subtleStyle.Render("    " + allLabel))
+		}
+		sb.WriteString("\n")
+
+		for i, inst := range m.installInstances {
+			check := "[ ]"
+			if m.installSel[i] {
+				check = "[x]"
+			}
+			rowIdx := i + 1
+			if rowIdx == m.installCursor {
+				sb.WriteString(selectedStyle.Render(fmt.Sprintf("  > %s %s", check, inst.Name)) + "  " + subtleStyle.Render(inst.GlobalSkillsPath))
+			} else {
+				sb.WriteString(normalStyle.Render(fmt.Sprintf("    %s %s", check, inst.Name)) + "  " + subtleStyle.Render(inst.GlobalSkillsPath))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(subtleStyle.Render("  space toggle • enter install • esc skip"))
 
 	return sb.String()
 }
