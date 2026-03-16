@@ -1,14 +1,35 @@
 # SkillRegistry
 
-SkillRegistry is a terminal user interface (TUI) for discovering, organizing, and managing custom skills across AI tools. It sources skills from local Git repositories, organizes them by AI provider, and creates intelligent symlinks to integrate them seamlessly with your development environment.
+## The Problem
 
-## How It Works
+AI-assisted development is fragmenting fast. Your team uses Claude Code, a colleague swears by Gemini CLI, half the frontend squad is on Cursor, and someone just introduced Codex. Each tool has its own config directory, its own way of loading custom skills, and its own conventions.
 
-SkillRegistry follows a three-step workflow:
+Now multiply that by the skills themselves. You have a repo of shared team prompts, a personal collection of coding patterns, open-source skill packs you pulled from GitHub — scattered across multiple repositories. Getting a single skill into a single tool means knowing where that tool looks for configs and manually copying or symlinking files there. Getting that same skill into three tools across two machines? Good luck.
 
-1. **Sources** — Add local Git repositories containing skills (custom prompts, functions, or configurations)
-2. **Providers & Instances** — Define which AI tools (Claude, Codex, Gemini, etc.) and their specific configurations should use skills
-3. **Symlinks** — Create managed symlinks from provider config directories to installed skills, enabling automatic discovery
+**What you end up with:**
+
+- Skills duplicated across provider directories, drifting out of sync
+- New team members spending hours figuring out which skills go where
+- Repository restructurings silently breaking installed skills
+- No single view of what's installed, where, or from which source
+- Switching or adding a new AI tool means repeating the entire setup
+
+## The Solution
+
+**SkillRegistry** is a terminal UI that treats skills as first-class, provider-agnostic packages. Point it at your skill repositories, tell it which AI tools you use, and it handles the rest — discovery, installation, syncing, and cleanup — through managed symlinks.
+
+```
+Sources (git repos)  →  SkillRegistry  →  Providers (Claude, Codex, Gemini, Cursor, ...)
+                          ↕
+                     SQLite database
+                   (single source of truth)
+```
+
+**Three concepts, one workflow:**
+
+1. **Sources** — Register local Git repositories containing skills. SkillRegistry scans them, parses metadata, and keeps track of changes when repos are restructured.
+2. **Providers & Instances** — Define your AI tools and their config directories. Support multiple instances of the same provider (e.g., "Claude-Personal" and "Claude-Work").
+3. **Install** — Browse discovered skills, pick a provider instance, and SkillRegistry creates a symlink. Uninstall removes it. That's it.
 
 ## Installation
 
