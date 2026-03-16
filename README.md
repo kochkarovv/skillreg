@@ -89,6 +89,8 @@ The main menu provides navigation to:
 | VSCode Copilot | `~/.github` |
 | Antigravity | `~/.gemini*/antigravity` |
 
+![Providers menu](docs/image/Providers%20menu.png)
+
 ## Adding Skills
 
 ### 1. Add a Source Repository
@@ -98,6 +100,8 @@ The main menu provides navigation to:
 3. Enter the local path to a Git repository containing skills
 4. Optionally scan to discover skills immediately
 
+![Sources menu](docs/image/Sources%20menu.png)
+
 ### 2. Install a Skill
 
 1. Open **Browse Skills**
@@ -105,6 +109,8 @@ The main menu provides navigation to:
 3. Choose **Install to Instance**
 4. Select a provider instance to install the skill
 5. SkillRegistry creates a symlink to integrate the skill
+
+![Skills menu](docs/image/Skills%20menu.png)
 
 ### 3. Configure Aliased Instances
 
