@@ -613,7 +613,7 @@ func (m sourcesMenuModel) view() string {
 func (m sourcesMenuModel) viewList() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Sources"))
+	sb.WriteString(titleStyle.Render("Skill Sources"))
 	sb.WriteString("\n\n")
 
 	if m.err != nil {

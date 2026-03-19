@@ -70,8 +70,8 @@ func (m mainMenuModel) buildItems() []menuItem {
 
 	return []menuItem{
 		{label: "Skills", count: skillCount, view: viewSkills},
-		{label: "Sources", count: sourceCount, view: viewSources},
-		{label: "Providers", count: providerCount, view: viewProviders},
+		{label: "Skill Sources", count: sourceCount, view: viewSources},
+		{label: "Agent Providers", count: providerCount, view: viewProviders},
 		{label: "Tools", count: -1, view: viewTools},
 	}
 }

@@ -551,7 +551,7 @@ func (m providersMenuModel) view() string {
 func (m providersMenuModel) viewList() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Providers"))
+	sb.WriteString(titleStyle.Render("Agent Providers"))
 	sb.WriteString("\n\n")
 
 	if m.err != nil {
